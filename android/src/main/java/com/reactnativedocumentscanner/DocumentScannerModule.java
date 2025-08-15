@@ -15,6 +15,8 @@ import android.widget.FrameLayout;
 import android.graphics.Color;
 import android.view.Gravity;
 import android.widget.TextView;
+import android.os.Handler;
+import android.os.Looper;
 
 import androidx.activity.ComponentActivity;
 import androidx.activity.result.ActivityResultLauncher;
@@ -50,12 +52,11 @@ import java.util.Objects;
 public class DocumentScannerModule extends ReactContextBaseJavaModule {
     public static final String NAME = "DocumentScanner";
 
-    // ✅ NEW: Instance variables for overlay management
+    // ✅ OVERLAY MANAGEMENT
     private FrameLayout customOverlayContainer;
-    private boolean showHomeButton = false;
-    private boolean showThumbnails = false;
-    private boolean showPreviewButton = false;
+    private Activity currentScannerActivity;
     private ReadableArray thumbnailsData = null;
+    private Handler mainHandler = new Handler(Looper.getMainLooper());
 
     public DocumentScannerModule(ReactApplicationContext reactContext) {
         super(reactContext);
@@ -67,7 +68,7 @@ public class DocumentScannerModule extends ReactContextBaseJavaModule {
         return NAME;
     }
 
-    // ✅ NEW: Event emission helper
+    // ✅ EVENT EMISSION TO REACT NATIVE
     private void sendEvent(String eventName, WritableMap params) {
         getReactApplicationContext()
                 .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
@@ -87,6 +88,12 @@ public class DocumentScannerModule extends ReactContextBaseJavaModule {
     @ReactMethod
     public void scanDocument(ReadableMap options, Promise promise) {
         Activity currentActivity = getCurrentActivity();
+        if (currentActivity == null) {
+            promise.reject("ACTIVITY_NOT_AVAILABLE", "Current activity is null");
+            return;
+        }
+
+        this.currentScannerActivity = currentActivity;
         WritableMap response = new WritableNativeMap();
 
         GmsDocumentScannerOptions.Builder documentScannerOptionsBuilder = new GmsDocumentScannerOptions.Builder()
@@ -94,12 +101,14 @@ public class DocumentScannerModule extends ReactContextBaseJavaModule {
                 .setScannerMode(GmsDocumentScannerOptions.SCANNER_MODE_FULL);
 
         if (options.hasKey("maxNumDocuments")) {
-            documentScannerOptionsBuilder.setPageLimit(
-                options.getInt("maxNumDocuments")
-            );
+            documentScannerOptionsBuilder.setPageLimit(options.getInt("maxNumDocuments"));
         }
 
-        // ✅ NEW: Parse custom overlay options
+        // ✅ PARSE CUSTOM OVERLAY OPTIONS
+        boolean showHomeButton = false;
+        boolean showThumbnails = false;
+        boolean showPreviewButton = false;
+
         if (options.hasKey("customOverlay")) {
             ReadableMap customOverlay = options.getMap("customOverlay");
             showHomeButton = customOverlay.hasKey("showHomeButton") && customOverlay.getBoolean("showHomeButton");
@@ -111,25 +120,18 @@ public class DocumentScannerModule extends ReactContextBaseJavaModule {
             }
         }
 
-        int croppedImageQuality;
-        if (options.hasKey("croppedImageQuality")) {
-            croppedImageQuality = options.getInt("croppedImageQuality");
-        } else {
-            croppedImageQuality = 100;
-        }
+        int croppedImageQuality = options.hasKey("croppedImageQuality") ? options.getInt("croppedImageQuality") : 100;
 
         GmsDocumentScanner scanner = GmsDocumentScanning.getClient(documentScannerOptionsBuilder.build());
         ActivityResultLauncher<IntentSenderRequest> scannerLauncher = ((ComponentActivity) currentActivity).getActivityResultRegistry().register(
                 "document-scanner",
                 new ActivityResultContracts.StartIntentSenderForResult(),
                 result -> {
-                    // ✅ CLEANUP: Remove overlay when scanner finishes
+                    // ✅ CLEANUP OVERLAY WHEN SCANNER FINISHES
                     removeCustomOverlay();
                     
                     if (result.getResultCode() == Activity.RESULT_OK) {
-                        GmsDocumentScanningResult documentScanningResult = GmsDocumentScanningResult.fromActivityResultIntent(
-                            result.getData()
-                        );
+                        GmsDocumentScanningResult documentScanningResult = GmsDocumentScanningResult.fromActivityResultIntent(result.getData());
                         WritableArray docScanResults = new WritableNativeArray();
 
                         if (documentScanningResult != null) {
@@ -144,6 +146,7 @@ public class DocumentScannerModule extends ReactContextBaseJavaModule {
                                             croppedImageResults = this.getImageInBase64(currentActivity, croppedImageUri, croppedImageQuality);
                                         } catch (FileNotFoundException error) {
                                             promise.reject("document scan error", error.getMessage());
+                                            return;
                                         }
                                     }
 
@@ -164,9 +167,12 @@ public class DocumentScannerModule extends ReactContextBaseJavaModule {
 
         scanner.getStartScanIntent(currentActivity)
             .addOnSuccessListener(intentSender -> {
-                // ✅ NEW: Add custom overlay before launching scanner
+                // ✅ ADD OVERLAY AFTER SCANNER STARTS
                 if (showHomeButton || showThumbnails || showPreviewButton) {
-                    addCustomOverlayToActivity(currentActivity);
+                    // Delay overlay injection to ensure scanner UI is ready
+                    mainHandler.postDelayed(() -> {
+                        addCustomOverlayToActivity(currentActivity, showHomeButton, showThumbnails, showPreviewButton);
+                    }, 1000);
                 }
                 scannerLauncher.launch(new IntentSenderRequest.Builder(intentSender).build());
             })
@@ -175,58 +181,62 @@ public class DocumentScannerModule extends ReactContextBaseJavaModule {
             });
     }
 
-    // ✅ NEW: Add custom overlay to the current activity
-    private void addCustomOverlayToActivity(Activity activity) {
+    // ✅ INJECT CUSTOM NATIVE OVERLAY
+    private void addCustomOverlayToActivity(Activity activity, boolean showHome, boolean showThumbnails, boolean showPreview) {
         if (activity == null) return;
 
-        // Get the root view of the activity
-        ViewGroup rootView = (ViewGroup) activity.findViewById(android.R.id.content);
-        
-        // Create overlay container
-        customOverlayContainer = new FrameLayout(activity);
-        FrameLayout.LayoutParams overlayParams = new FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.MATCH_PARENT
-        );
-        
-        // Add home button
-        if (showHomeButton) {
-            Button homeButton = createHomeButton(activity);
-            customOverlayContainer.addView(homeButton);
-        }
+        mainHandler.post(() -> {
+            try {
+                // Get the root view (DecorView contains all views including status bar)
+                ViewGroup rootView = (ViewGroup) activity.getWindow().getDecorView();
+                
+                // Create overlay container
+                customOverlayContainer = new FrameLayout(activity);
+                FrameLayout.LayoutParams overlayParams = new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                );
+                
+                // Set overlay to be clickable but allow touches to pass through where there are no views
+                customOverlayContainer.setClickable(false);
+                customOverlayContainer.setFocusable(false);
 
-        // Add thumbnails strip
-        if (showThumbnails && thumbnailsData != null) {
-            HorizontalScrollView thumbnailsStrip = createThumbnailsStrip(activity);
-            customOverlayContainer.addView(thumbnailsStrip);
-        }
+                // Add UI elements
+                if (showHome) {
+                    Button homeButton = createHomeButton(activity);
+                    customOverlayContainer.addView(homeButton);
+                }
 
-        // Add preview button
-        if (showPreviewButton) {
-            Button previewButton = createPreviewButton(activity);
-            customOverlayContainer.addView(previewButton);
-        }
+                if (showThumbnails && thumbnailsData != null) {
+                    HorizontalScrollView thumbnailsStrip = createThumbnailsStrip(activity);
+                    customOverlayContainer.addView(thumbnailsStrip);
+                }
 
-        // Add overlay to root view with delay to ensure scanner UI is ready
-        activity.runOnUiThread(() -> {
-            // Small delay to ensure the scanner activity is fully loaded
-            customOverlayContainer.postDelayed(() -> {
+                if (showPreview) {
+                    Button previewButton = createPreviewButton(activity);
+                    customOverlayContainer.addView(previewButton);
+                }
+
+                // Add overlay to root view
                 rootView.addView(customOverlayContainer, overlayParams);
-            }, 500);
+                
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
         });
     }
 
-    // ✅ NEW: Create home button
+    // ✅ CREATE HOME BUTTON
     private Button createHomeButton(Activity activity) {
         Button homeButton = new Button(activity);
         homeButton.setText("🏠");
         homeButton.setTextSize(20);
-        homeButton.setBackgroundColor(Color.parseColor("#80000000")); // Semi-transparent black
+        homeButton.setBackgroundColor(Color.parseColor("#80000000"));
         homeButton.setTextColor(Color.WHITE);
         
-        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(150, 120);
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(120, 120);
         params.leftMargin = 40;
-        params.topMargin = 80;
+        params.topMargin = 100;
         params.gravity = Gravity.TOP | Gravity.LEFT;
         homeButton.setLayoutParams(params);
         
@@ -238,19 +248,21 @@ public class DocumentScannerModule extends ReactContextBaseJavaModule {
         return homeButton;
     }
 
-    // ✅ NEW: Create thumbnails strip
+    // ✅ CREATE THUMBNAILS STRIP
     private HorizontalScrollView createThumbnailsStrip(Activity activity) {
         HorizontalScrollView scrollView = new HorizontalScrollView(activity);
+        scrollView.setBackgroundColor(Color.parseColor("#80000000"));
+        
         LinearLayout container = new LinearLayout(activity);
         container.setOrientation(LinearLayout.HORIZONTAL);
-        container.setPadding(20, 0, 20, 0);
+        container.setPadding(20, 20, 20, 20);
         
         // Add thumbnail images from thumbnailsData
         if (thumbnailsData != null) {
             for (int i = 0; i < thumbnailsData.size(); i++) {
                 ReadableMap thumbnail = thumbnailsData.getMap(i);
                 if (thumbnail != null && thumbnail.hasKey("uri")) {
-                    ImageView thumbnailView = createThumbnailView(activity, thumbnail.getString("uri"), i);
+                    View thumbnailView = createThumbnailView(activity, thumbnail.getString("uri"), i);
                     container.addView(thumbnailView);
                 }
             }
@@ -258,7 +270,7 @@ public class DocumentScannerModule extends ReactContextBaseJavaModule {
         
         FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
-            200
+            160
         );
         params.bottomMargin = 200;
         params.gravity = Gravity.BOTTOM;
@@ -268,39 +280,47 @@ public class DocumentScannerModule extends ReactContextBaseJavaModule {
         return scrollView;
     }
 
-    // ✅ NEW: Create individual thumbnail view
-    private ImageView createThumbnailView(Activity activity, String uri, int index) {
-        ImageView imageView = new ImageView(activity);
+    // ✅ CREATE INDIVIDUAL THUMBNAIL
+    private View createThumbnailView(Activity activity, String uri, int index) {
+        FrameLayout container = new FrameLayout(activity);
         
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(160, 160);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(120, 120);
         params.rightMargin = 16;
-        imageView.setLayoutParams(params);
-        imageView.setScaleType(ImageView.ScaleType.CENTER_CROP);
-        imageView.setBackgroundColor(Color.parseColor("#80FFFFFF"));
+        container.setLayoutParams(params);
+        container.setBackgroundColor(Color.parseColor("#80FFFFFF"));
         
-        // Load image from URI (you'd need a proper image loading library like Glide in production)
-        // For now, just set a placeholder background
-        imageView.setBackground(activity.getResources().getDrawable(android.R.drawable.ic_menu_gallery));
+        // Create a simple placeholder button (in production, you'd load the actual image)
+        Button thumbnailButton = new Button(activity);
+        thumbnailButton.setText("📷");
+        thumbnailButton.setTextSize(16);
+        thumbnailButton.setBackgroundColor(Color.TRANSPARENT);
         
-        imageView.setOnClickListener(v -> {
+        FrameLayout.LayoutParams buttonParams = new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        );
+        thumbnailButton.setLayoutParams(buttonParams);
+        
+        thumbnailButton.setOnClickListener(v -> {
             WritableMap eventData = new WritableNativeMap();
             eventData.putInt("index", index);
             eventData.putString("uri", uri);
             sendEvent("onThumbnailPressed", eventData);
         });
         
-        return imageView;
+        container.addView(thumbnailButton);
+        return container;
     }
 
-    // ✅ NEW: Create preview button
+    // ✅ CREATE PREVIEW BUTTON
     private Button createPreviewButton(Activity activity) {
         Button previewButton = new Button(activity);
         previewButton.setText("📄");
         previewButton.setTextSize(20);
-        previewButton.setBackgroundColor(Color.parseColor("#CC0066CC")); // Blue with transparency
+        previewButton.setBackgroundColor(Color.parseColor("#CC0066CC"));
         previewButton.setTextColor(Color.WHITE);
         
-        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(150, 120);
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(120, 120);
         params.rightMargin = 40;
         params.bottomMargin = 240;
         params.gravity = Gravity.BOTTOM | Gravity.RIGHT;
@@ -314,11 +334,13 @@ public class DocumentScannerModule extends ReactContextBaseJavaModule {
         return previewButton;
     }
 
-    // ✅ NEW: Remove custom overlay
+    // ✅ CLEANUP OVERLAY
     private void removeCustomOverlay() {
-        if (customOverlayContainer != null && customOverlayContainer.getParent() != null) {
-            ((ViewGroup) customOverlayContainer.getParent()).removeView(customOverlayContainer);
-            customOverlayContainer = null;
-        }
+        mainHandler.post(() -> {
+            if (customOverlayContainer != null && customOverlayContainer.getParent() != null) {
+                ((ViewGroup) customOverlayContainer.getParent()).removeView(customOverlayContainer);
+                customOverlayContainer = null;
+            }
+        });
     }
 }
