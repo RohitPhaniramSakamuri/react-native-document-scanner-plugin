@@ -1,4 +1,4 @@
-import { NativeModules, Platform } from 'react-native';
+import { NativeModules, Platform, NativeEventEmitter, EmitterSubscription } from 'react-native';
 
 const LINKING_ERROR =
   `The package 'react-native-document-scanner-plugin' doesn't seem to be linked. Make sure: \n\n` +
@@ -17,16 +17,38 @@ const DocumentScanner = NativeModules.DocumentScanner
       }
     );
 
-export default {
+// ✅ NEW: Event emitter for native events
+const documentScannerEmitter = new NativeEventEmitter(DocumentScanner);
+
+// ✅ NEW: Custom overlay options interface
+export interface CustomOverlayOptions {
   /**
-   * Opens the camera, and starts the document scan
+   * Show a home button in the scanner overlay
+   * @default: false
    */
-  scanDocument(
-    options: ScanDocumentOptions = {}
-  ): Promise<ScanDocumentResponse> {
-    return DocumentScanner.scanDocument(options);
-  },
-};
+  showHomeButton?: boolean;
+  
+  /**
+   * Show thumbnails strip in the scanner overlay
+   * @default: false
+   */
+  showThumbnails?: boolean;
+  
+  /**
+   * Show a preview button in the scanner overlay
+   * @default: false
+   */
+  showPreviewButton?: boolean;
+  
+  /**
+   * Array of thumbnail data to display in the thumbnails strip
+   */
+  thumbnails?: Array<{
+    uri: string;
+    width?: number;
+    height?: number;
+  }>;
+}
 
 export interface ScanDocumentOptions {
   /**
@@ -47,6 +69,12 @@ export interface ScanDocumentOptions {
    * @default: ResponseType.ImageFilePath
    */
   responseType?: ResponseType;
+
+  // ✅ NEW: Custom overlay configuration
+  /**
+   * Configuration for custom UI overlay on the scanner
+   */
+  customOverlay?: CustomOverlayOptions;
 }
 
 export enum ResponseType {
@@ -88,3 +116,44 @@ export enum ScanDocumentResponseStatus {
    */
   Cancel = 'cancel',
 }
+
+// ✅ NEW: Event listener types
+export interface DocumentScannerEvents {
+  onHomeButtonPressed: () => void;
+  onPreviewButtonPressed: () => void;
+  onThumbnailPressed: (data: { index: number; uri: string }) => void;
+}
+
+// ✅ NEW: Event listener functions
+export const addEventListener = <K extends keyof DocumentScannerEvents>(
+  eventName: K,
+  handler: DocumentScannerEvents[K]
+): EmitterSubscription => {
+  return documentScannerEmitter.addListener(eventName, handler);
+};
+
+export const removeEventListener = (subscription: EmitterSubscription) => {
+  subscription.remove();
+};
+
+// ✅ ENHANCED: Export with event listener functions
+export default {
+  /**
+   * Opens the camera, and starts the document scan
+   */
+  scanDocument(
+    options: ScanDocumentOptions = {}
+  ): Promise<ScanDocumentResponse> {
+    return DocumentScanner.scanDocument(options);
+  },
+  
+  /**
+   * Add event listener for custom overlay events
+   */
+  addEventListener,
+  
+  /**
+   * Remove event listener
+   */
+  removeEventListener,
+};
