@@ -86,100 +86,106 @@ public class DocumentScannerModule extends ReactContextBaseJavaModule {
     }
 
     @ReactMethod
-    public void scanDocument(ReadableMap options, Promise promise) {
-        Activity currentActivity = getCurrentActivity();
-        if (currentActivity == null) {
-            promise.reject("ACTIVITY_NOT_AVAILABLE", "Current activity is null");
-            return;
+public void scanDocument(ReadableMap options, Promise promise) {
+    Activity currentActivity = getCurrentActivity();
+    if (currentActivity == null) {
+        promise.reject("ACTIVITY_NOT_AVAILABLE", "Current activity is null");
+        return;
+    }
+
+    this.currentScannerActivity = currentActivity;
+    WritableMap response = new WritableNativeMap();
+
+    GmsDocumentScannerOptions.Builder documentScannerOptionsBuilder = new GmsDocumentScannerOptions.Builder()
+            .setResultFormats(GmsDocumentScannerOptions.RESULT_FORMAT_JPEG)
+            .setScannerMode(GmsDocumentScannerOptions.SCANNER_MODE_FULL);
+
+    if (options.hasKey("maxNumDocuments")) {
+        documentScannerOptionsBuilder.setPageLimit(options.getInt("maxNumDocuments"));
+    }
+
+    // ✅ PARSE CUSTOM OVERLAY OPTIONS
+    boolean showHomeButton = false;
+    boolean showThumbnails = false;
+    boolean showPreviewButton = false;
+
+    if (options.hasKey("customOverlay")) {
+        ReadableMap customOverlay = options.getMap("customOverlay");
+        showHomeButton = customOverlay.hasKey("showHomeButton") && customOverlay.getBoolean("showHomeButton");
+        showThumbnails = customOverlay.hasKey("showThumbnails") && customOverlay.getBoolean("showThumbnails");
+        showPreviewButton = customOverlay.hasKey("showPreviewButton") && customOverlay.getBoolean("showPreviewButton");
+        
+        if (customOverlay.hasKey("thumbnails")) {
+            thumbnailsData = customOverlay.getArray("thumbnails");
         }
+    }
 
-        this.currentScannerActivity = currentActivity;
-        WritableMap response = new WritableNativeMap();
+    // ✅ FIX: Make variables final for lambda usage
+    final boolean finalShowHomeButton = showHomeButton;
+    final boolean finalShowThumbnails = showThumbnails;
+    final boolean finalShowPreviewButton = showPreviewButton;
+    final Activity finalCurrentActivity = currentActivity;
 
-        GmsDocumentScannerOptions.Builder documentScannerOptionsBuilder = new GmsDocumentScannerOptions.Builder()
-                .setResultFormats(GmsDocumentScannerOptions.RESULT_FORMAT_JPEG)
-                .setScannerMode(GmsDocumentScannerOptions.SCANNER_MODE_FULL);
+    int croppedImageQuality = options.hasKey("croppedImageQuality") ? options.getInt("croppedImageQuality") : 100;
 
-        if (options.hasKey("maxNumDocuments")) {
-            documentScannerOptionsBuilder.setPageLimit(options.getInt("maxNumDocuments"));
-        }
+    GmsDocumentScanner scanner = GmsDocumentScanning.getClient(documentScannerOptionsBuilder.build());
+    ActivityResultLauncher<IntentSenderRequest> scannerLauncher = ((ComponentActivity) currentActivity).getActivityResultRegistry().register(
+            "document-scanner",
+            new ActivityResultContracts.StartIntentSenderForResult(),
+            result -> {
+                // ✅ CLEANUP OVERLAY WHEN SCANNER FINISHES
+                removeCustomOverlay();
+                
+                if (result.getResultCode() == Activity.RESULT_OK) {
+                    GmsDocumentScanningResult documentScanningResult = GmsDocumentScanningResult.fromActivityResultIntent(result.getData());
+                    WritableArray docScanResults = new WritableNativeArray();
 
-        // ✅ PARSE CUSTOM OVERLAY OPTIONS
-        boolean showHomeButton = false;
-        boolean showThumbnails = false;
-        boolean showPreviewButton = false;
+                    if (documentScanningResult != null) {
+                        List<Page> pages = documentScanningResult.getPages();
+                        if (pages != null) {
+                            for (Page page : pages) {
+                                Uri croppedImageUri = page.getImageUri();
+                                String croppedImageResults = croppedImageUri.toString();
 
-        if (options.hasKey("customOverlay")) {
-            ReadableMap customOverlay = options.getMap("customOverlay");
-            showHomeButton = customOverlay.hasKey("showHomeButton") && customOverlay.getBoolean("showHomeButton");
-            showThumbnails = customOverlay.hasKey("showThumbnails") && customOverlay.getBoolean("showThumbnails");
-            showPreviewButton = customOverlay.hasKey("showPreviewButton") && customOverlay.getBoolean("showPreviewButton");
-            
-            if (customOverlay.hasKey("thumbnails")) {
-                thumbnailsData = customOverlay.getArray("thumbnails");
-            }
-        }
-
-        int croppedImageQuality = options.hasKey("croppedImageQuality") ? options.getInt("croppedImageQuality") : 100;
-
-        GmsDocumentScanner scanner = GmsDocumentScanning.getClient(documentScannerOptionsBuilder.build());
-        ActivityResultLauncher<IntentSenderRequest> scannerLauncher = ((ComponentActivity) currentActivity).getActivityResultRegistry().register(
-                "document-scanner",
-                new ActivityResultContracts.StartIntentSenderForResult(),
-                result -> {
-                    // ✅ CLEANUP OVERLAY WHEN SCANNER FINISHES
-                    removeCustomOverlay();
-                    
-                    if (result.getResultCode() == Activity.RESULT_OK) {
-                        GmsDocumentScanningResult documentScanningResult = GmsDocumentScanningResult.fromActivityResultIntent(result.getData());
-                        WritableArray docScanResults = new WritableNativeArray();
-
-                        if (documentScanningResult != null) {
-                            List<Page> pages = documentScanningResult.getPages();
-                            if (pages != null) {
-                                for (Page page : pages) {
-                                    Uri croppedImageUri = page.getImageUri();
-                                    String croppedImageResults = croppedImageUri.toString();
-
-                                    if (options.hasKey("responseType") && Objects.equals(options.getString("responseType"), "base64")) {
-                                        try {
-                                            croppedImageResults = this.getImageInBase64(currentActivity, croppedImageUri, croppedImageQuality);
-                                        } catch (FileNotFoundException error) {
-                                            promise.reject("document scan error", error.getMessage());
-                                            return;
-                                        }
+                                if (options.hasKey("responseType") && Objects.equals(options.getString("responseType"), "base64")) {
+                                    try {
+                                        croppedImageResults = this.getImageInBase64(finalCurrentActivity, croppedImageUri, croppedImageQuality);
+                                    } catch (FileNotFoundException error) {
+                                        promise.reject("document scan error", error.getMessage());
+                                        return;
                                     }
-
-                                    docScanResults.pushString(croppedImageResults);
                                 }
+
+                                docScanResults.pushString(croppedImageResults);
                             }
                         }
-
-                        response.putArray("scannedImages", docScanResults);
-                        response.putString("status", "success");
-                        promise.resolve(response);
-                    } else if (result.getResultCode() == Activity.RESULT_CANCELED) {
-                        response.putString("status", "cancel");
-                        promise.resolve(response);
                     }
-                }
-        );
 
-        scanner.getStartScanIntent(currentActivity)
-            .addOnSuccessListener(intentSender -> {
-                // ✅ ADD OVERLAY AFTER SCANNER STARTS
-                if (showHomeButton || showThumbnails || showPreviewButton) {
-                    // Delay overlay injection to ensure scanner UI is ready
-                    mainHandler.postDelayed(() -> {
-                        addCustomOverlayToActivity(currentActivity, showHomeButton, showThumbnails, showPreviewButton);
-                    }, 1000);
+                    response.putArray("scannedImages", docScanResults);
+                    response.putString("status", "success");
+                    promise.resolve(response);
+                } else if (result.getResultCode() == Activity.RESULT_CANCELED) {
+                    response.putString("status", "cancel");
+                    promise.resolve(response);
                 }
-                scannerLauncher.launch(new IntentSenderRequest.Builder(intentSender).build());
-            })
-            .addOnFailureListener(error -> {
-                promise.reject("document scan error", error.getMessage());
-            });
-    }
+            }
+    );
+
+    scanner.getStartScanIntent(currentActivity)
+        .addOnSuccessListener(intentSender -> {
+            // ✅ FIXED: Use final variables in lambda
+            if (finalShowHomeButton || finalShowThumbnails || finalShowPreviewButton) {
+                // Delay overlay injection to ensure scanner UI is ready
+                mainHandler.postDelayed(() -> {
+                    addCustomOverlayToActivity(finalCurrentActivity, finalShowHomeButton, finalShowThumbnails, finalShowPreviewButton);
+                }, 1000);
+            }
+            scannerLauncher.launch(new IntentSenderRequest.Builder(intentSender).build());
+        })
+        .addOnFailureListener(error -> {
+            promise.reject("document scan error", error.getMessage());
+        });
+}
 
     // ✅ INJECT CUSTOM NATIVE OVERLAY
     private void addCustomOverlayToActivity(Activity activity, boolean showHome, boolean showThumbnails, boolean showPreview) {
